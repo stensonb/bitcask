@@ -723,6 +723,162 @@ func TestStatsError(t *testing.T) {
 	})
 }
 
+func TestDirFileModeBeforeUmask(t *testing.T) {
+	assert := assert.New(t)
+
+	t.Run("Setup", func(t *testing.T) {
+		t.Run("Default DirFileModeBeforeUmask is 0700", func(t *testing.T) {
+			testdir, err := ioutil.TempDir("", "bitcask")
+			embeddedDir := filepath.Join(testdir, "cache")
+			assert.NoError(err)
+			defer os.RemoveAll(testdir)
+
+			defaultTestMode := os.FileMode(0700)
+
+			db, err := Open(embeddedDir)
+			defer db.Close()
+			assert.NoError(err)
+			err = filepath.Walk(testdir, func(path string, info os.FileInfo, err error) error {
+				// skip the root directory
+				if path == testdir {
+					return nil
+				}
+				if info.IsDir() {
+					// perms for directory on disk are filtered through defaultTestMode, AND umask of user running test.
+					// this means the mkdir calls can only FURTHER restrict permissions, not grant more (preventing escalatation).
+					// to make this test OS agnostic, we'll skip using golang.org/x/sys/unix, inferring umask via XOR and AND NOT.
+
+					// create anotherDir with allPerms - to infer umask
+					anotherDir := filepath.Join(testdir, "temp")
+					allPerms := os.FileMode(0777)
+					err := os.Mkdir(anotherDir, allPerms)
+					assert.NoError(err)
+					defer os.RemoveAll(anotherDir)
+
+					anotherStat, err := os.Stat(anotherDir)
+					assert.NoError(err)
+
+					// infer umask from anotherDir
+					umask := allPerms ^ (anotherStat.Mode() & os.ModePerm)
+
+					assert.Equal(info.Mode()&os.ModePerm, defaultTestMode&^umask)
+				}
+				return nil
+			})
+			assert.NoError(err)
+		})
+
+		t.Run("Dir FileModeBeforeUmask is set via options for all subdirectories", func(t *testing.T) {
+			testdir, err := ioutil.TempDir("", "bitcask")
+			embeddedDir := filepath.Join(testdir, "cache")
+			assert.NoError(err)
+			defer os.RemoveAll(testdir)
+
+			testMode := os.FileMode(0713)
+
+			db, err := Open(embeddedDir, WithDirFileModeBeforeUmask(testMode))
+			defer db.Close()
+			assert.NoError(err)
+			err = filepath.Walk(testdir, func(path string, info os.FileInfo, err error) error {
+				// skip the root directory
+				if path == testdir {
+					return nil
+				}
+				if info.IsDir() {
+					// create anotherDir with allPerms - to infer umask
+					anotherDir := filepath.Join(testdir, "temp")
+					allPerms := os.FileMode(0777)
+					err := os.Mkdir(anotherDir, allPerms)
+					assert.NoError(err)
+					defer os.RemoveAll(anotherDir)
+
+					anotherStat, _ := os.Stat(anotherDir)
+
+					// infer umask from anotherDir
+					umask := allPerms ^ (anotherStat.Mode() & os.ModePerm)
+
+					assert.Equal(info.Mode()&os.ModePerm, testMode&^umask)
+				}
+				return nil
+			})
+			assert.NoError(err)
+		})
+
+	})
+}
+
+func TestFileFileModeBeforeUmask(t *testing.T) {
+	assert := assert.New(t)
+
+	t.Run("Setup", func(t *testing.T) {
+		t.Run("Default File FileModeBeforeUmask is 0600", func(t *testing.T) {
+			testdir, err := ioutil.TempDir("", "bitcask")
+			assert.NoError(err)
+			defer os.RemoveAll(testdir)
+
+			defaultTestMode := os.FileMode(0600)
+
+			db, err := Open(testdir)
+			defer db.Close()
+			assert.NoError(err)
+			err = filepath.Walk(testdir, func(path string, info os.FileInfo, err error) error {
+				if !info.IsDir() {
+					// create aFile with allPerms - to infer umask
+					aFilePath := filepath.Join(testdir, "temp")
+					allPerms := os.FileMode(0777)
+					_, err := os.OpenFile(aFilePath, os.O_CREATE, allPerms)
+					assert.NoError(err)
+					defer os.RemoveAll(aFilePath)
+
+					fileStat, _ := os.Stat(aFilePath)
+
+					// infer umask from anotherDir
+					umask := allPerms ^ (fileStat.Mode() & os.ModePerm)
+
+					assert.Equal(info.Mode()&os.ModePerm, defaultTestMode&^umask)
+				}
+				return nil
+			})
+			assert.NoError(err)
+		})
+
+		t.Run("File FileModeBeforeUmask is set via options for all files", func(t *testing.T) {
+			testdir, err := ioutil.TempDir("", "bitcask")
+			assert.NoError(err)
+			defer os.RemoveAll(testdir)
+
+			testMode := os.FileMode(0673)
+
+			db, err := Open(testdir, WithFileFileModeBeforeUmask(testMode))
+			defer db.Close()
+			assert.NoError(err)
+			err = filepath.Walk(testdir, func(path string, info os.FileInfo, err error) error {
+				if !info.IsDir() {
+					// the lock file is set within Flock, so ignore it
+					if filepath.Base(path) == "lock" {
+						return nil
+					}
+					// create aFile with allPerms - to infer umask
+					aFilePath := filepath.Join(testdir, "temp")
+					allPerms := os.FileMode(0777)
+					_, err := os.OpenFile(aFilePath, os.O_CREATE, allPerms)
+					assert.NoError(err)
+					defer os.RemoveAll(aFilePath)
+
+					fileStat, _ := os.Stat(aFilePath)
+
+					// infer umask from anotherDir
+					umask := allPerms ^ (fileStat.Mode() & os.ModePerm)
+
+					assert.Equal(info.Mode()&os.ModePerm, testMode&^umask)
+				}
+				return nil
+			})
+			assert.NoError(err)
+		})
+	})
+}
+
 func TestMaxDatafileSize(t *testing.T) {
 	var (
 		db  *Bitcask
